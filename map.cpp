@@ -1912,21 +1912,6 @@ void map::drawsq(WINDOW* w, player &u, int x, int y, bool invert,
   mvwputch    (w, j, k, tercol, sym);
 }
 
-//WIP: faster map::sees
-bool map::sees(int Fx, int Fy, int Tx, int Ty, int range, int &tc)
-{
- int dx = abs(Tx - Fx);
- int dy = abs(Ty - Fy);
- if (dx == 0) { // Infinite slope, special case
-  tc = 0; // doesn't matter who even cares
-  for (int y = Fy; y <= Ty; y++) {
-   if (!trans(x, y))
-    return false;
-  }
-  return true;
- }
- for (int x = Fx; x <= Tx; x++) {
-  int Yhl = 
 
 /*
 map::sees based off code by Steve Register [arns@arns.freeservers.com]
