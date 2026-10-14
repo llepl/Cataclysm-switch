@@ -1,7 +1,7 @@
 #if (defined _WIN32 || defined WINDOWS)
 	#include "catacurse.h"
 #else
-	#include <curses.h>
+	#include "catacurse.h"
 #endif
 
 #include <stdlib.h>

@@ -8,7 +8,7 @@
 #if (defined _WIN32 || defined WINDOWS)
 	#include "catacurse.h"
 #else
-	#include <curses.h>
+	#include "catacurse.h"
 #endif
 
 void hit_message(game *g, std::string subject, std::string verb,

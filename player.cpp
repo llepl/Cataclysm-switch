@@ -15,7 +15,7 @@
 #if (defined _WIN32 || defined WINDOWS)
 	#include "catacurse.h"
 #else
-	#include <curses.h>
+	#include "catacurse.h"
 #endif
 
 nc_color encumb_color(int level);

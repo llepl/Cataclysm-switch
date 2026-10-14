@@ -5,7 +5,7 @@
 #WARNINGS = -Wall -Wextra -Wno-switch -Wno-sign-compare -Wno-missing-braces -Wno-unused-parameter -Wno-char-subscripts
 #DEBUG = -g
 #PROFILE = -pg
-OTHERS = -O3 -std=gnu++98
+OTHERS = -g -O0 -std=gnu++98 $(shell sdl2-config --cflags)
 
 ODIR = obj
 DDIR = .deps
@@ -20,7 +20,7 @@ CFLAGS = $(WARNINGS) $(DEBUG) $(PROFILE) $(OTHERS)
 ifeq ($(OS), Msys)
 LDFLAGS = -static -lpdcurses
 else 
-LDFLAGS = -lncurses
+LDFLAGS = -lSDL2 -lSDL2_ttf
 endif
 
 SOURCES = $(wildcard *.cpp)
