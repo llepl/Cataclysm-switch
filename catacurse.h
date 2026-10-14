@@ -129,4 +129,7 @@ int getmaxx(WINDOW *win);
 int getmaxy(WINDOW *win);
 int move(int y, int x);
 void timeout(int delay);
+
+// Shows / hides a permanent hint bar on the bottom row (used on the main menu).
+void set_hint_bar(bool on);
 #endif

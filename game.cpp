@@ -131,6 +131,11 @@ void game::setup()
 
 bool game::opening_screen()
 {
+ // controller hint bar: visible on the main menu only
+ struct hint_bar_guard {
+  hint_bar_guard() { set_hint_bar(true); }
+  ~hint_bar_guard() { set_hint_bar(false); }
+ } hint_bar_guard_obj;
  WINDOW* w_open = newwin(25, 80, 0, 0);
  erase();
  for (int i = 0; i < 80; i++)
@@ -282,6 +287,7 @@ fivedozenwhales@gmail.com.");
        delwin(w_open);
        return (opening_screen());
       }
+      set_hint_bar(false);
       start_game();
       start = true;
       ch = 0;
@@ -299,6 +305,7 @@ fivedozenwhales@gmail.com.");
        delwin(w_open);
        return (opening_screen());
       }
+      set_hint_bar(false);
       start_game();
       start = true;
       ch = 0;
@@ -425,6 +432,7 @@ fivedozenwhales@gmail.com.");
      delwin(w_open);
      return (opening_screen());
     }
+    set_hint_bar(false);
     start_game();
     start = true;
     ch = 0;

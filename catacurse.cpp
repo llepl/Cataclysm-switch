@@ -12,6 +12,9 @@
 #include <vector>
 #include <utility>
 #include <ctype.h>
+#ifdef __SWITCH__
+#include <unistd.h>
+#endif
 #include <math.h>
 
 #define SCR_COLS 80
@@ -39,6 +42,8 @@ static std::map<unsigned short, glyph_t> g_glyphs;
 static WINDOW *g_std = NULL;
 static std::string g_toast;          // short hint line shown over the bottom row
 static Uint32 g_toast_until = 0;
+static bool g_toast_sticky = false;   // hint bar that stays (main menu)
+static std::string g_sticky_text = "L3+R3: controller settings   |   START: on-screen keyboard";
 static bool g_first_run = false;     // no controls.cfg existed yet
 static int g_timeout = -1;
 static std::deque<int> g_keys;
@@ -72,6 +77,7 @@ static glyph_t get_glyph(unsigned short ch)
 // Drawn on top of the game in present(); the game keeps running underneath.
 // ---------------------------------------------------------------------------
 static bool g_vk_open = false;
+static bool g_ui_active = false;   // in-game controller settings menu is open
 static int  g_vk_r = 0, g_vk_c = 0;
 typedef std::pair<std::string, int> vkitem;
 static std::vector<std::vector<vkitem> > g_vk_rows;
@@ -137,6 +143,37 @@ static void vk_compose(cursecell *buf)
  buf_text(buf, SCR_ROWS - 1, 2, "D-pad/stick: move   A: type   X: backspace   B or START: close", 8, 0);
 }
 
+// Only the cells that changed since the last frame are redrawn into an off-screen
+// texture; that texture is then copied to the window with a single draw call.
+static SDL_Texture *g_target = NULL;
+static cursecell g_prev[SCR_ROWS * SCR_COLS];
+static bool g_prev_valid = false;
+static bool g_present_pending = false;   // a refresh was skipped (throttled), draw it later
+static Uint32 g_last_present = 0;
+#define PRESENT_MIN_MS 25
+
+static void draw_cell(const cursecell &cell, int r, int c)
+{
+ SDL_Rect dst;
+ dst.x = c * g_cw; dst.y = r * g_chh; dst.w = g_cw; dst.h = g_chh;
+ const unsigned char *b = PAL[cell.bg & 7];
+ SDL_SetRenderDrawColor(g_renderer, b[0], b[1], b[2], 255);
+ SDL_RenderFillRect(g_renderer, &dst);
+ if (cell.ch != ' ' && cell.ch != 0) {
+  glyph_t g = get_glyph(cell.ch);
+  if (g.tex) {
+   const unsigned char *f = PAL[cell.fg & 15];
+   SDL_SetTextureColorMod(g.tex, f[0], f[1], f[2]);
+   if (cell.ch >= 0x2500 && cell.ch <= 0x257F) {
+    SDL_RenderCopy(g_renderer, g.tex, NULL, &dst);   // box drawing: fill the whole cell
+   } else {
+    SDL_Rect d2 = dst; d2.w = g.w; d2.h = g.h;
+    SDL_RenderCopy(g_renderer, g.tex, NULL, &d2);
+   }
+  }
+ }
+}
+
 static void present()
 {
  if (!g_renderer)
@@ -148,36 +185,41 @@ static void present()
   vk_compose(comp);
   src = comp;
  }
- SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
- SDL_RenderClear(g_renderer);
- for (int r = 0; r < SCR_ROWS; r++) {
-  for (int c = 0; c < SCR_COLS; c++) {
-   const cursecell &cell = src[r * SCR_COLS + c];
-   SDL_Rect dst;
-   dst.x = c * g_cw; dst.y = r * g_chh; dst.w = g_cw; dst.h = g_chh;
-   if (cell.bg != 0) {
-    const unsigned char *b = PAL[cell.bg & 7];
-    SDL_SetRenderDrawColor(g_renderer, b[0], b[1], b[2], 255);
-    SDL_RenderFillRect(g_renderer, &dst);
-   }
-   if (cell.ch != ' ' && cell.ch != 0) {
-    glyph_t g = get_glyph(cell.ch);
-    if (g.tex) {
-     const unsigned char *f = PAL[cell.fg & 15];
-     SDL_SetTextureColorMod(g.tex, f[0], f[1], f[2]);
-     if (cell.ch >= 0x2500 && cell.ch <= 0x257F) {
-      SDL_RenderCopy(g_renderer, g.tex, NULL, &dst);   // box drawing: fill the whole cell
-     } else {
-      SDL_Rect d2 = dst; d2.w = g.w; d2.h = g.h;
-      SDL_RenderCopy(g_renderer, g.tex, NULL, &d2);
-     }
-    }
+
+ if (!g_target) {
+  g_target = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                               SCR_COLS * g_cw, SCR_ROWS * g_chh);
+  g_prev_valid = false;
+ }
+ if (g_target) {
+  SDL_SetRenderTarget(g_renderer, g_target);
+  for (int r = 0; r < SCR_ROWS; r++) {
+   for (int c = 0; c < SCR_COLS; c++) {
+    int i = r * SCR_COLS + c;
+    if (g_prev_valid && memcmp(&src[i], &g_prev[i], sizeof(cursecell)) == 0)
+     continue;
+    draw_cell(src[i], r, c);
    }
   }
+  memcpy(g_prev, src, sizeof(g_prev));
+  g_prev_valid = true;
+  SDL_SetRenderTarget(g_renderer, NULL);
+  SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+  SDL_RenderClear(g_renderer);
+  SDL_RenderCopy(g_renderer, g_target, NULL, NULL);
+ } else {
+  // no render-target support: redraw everything every frame
+  SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+  SDL_RenderClear(g_renderer);
+  for (int r = 0; r < SCR_ROWS; r++)
+   for (int c = 0; c < SCR_COLS; c++)
+    draw_cell(src[r * SCR_COLS + c], r, c);
  }
- if (g_toast_until && SDL_GetTicks() < g_toast_until) {
+ bool timed = g_toast_until && SDL_GetTicks() < g_toast_until;
+ if ((timed || g_toast_sticky) && !g_vk_open && !g_ui_active) {
+  const std::string &txt = timed ? g_toast : g_sticky_text;
   int row = SCR_ROWS - 1;
-  int start = (SCR_COLS - (int)g_toast.size()) / 2;
+  int start = (SCR_COLS - (int)txt.size()) / 2;
   if (start < 0) start = 0;
   for (int c = 0; c < SCR_COLS; c++) {
    SDL_Rect dst;
@@ -185,8 +227,8 @@ static void present()
    SDL_SetRenderDrawColor(g_renderer, 230, 230, 230, 255);
    SDL_RenderFillRect(g_renderer, &dst);
    int idx = c - start;
-   if (idx >= 0 && idx < (int)g_toast.size() && g_toast[idx] != ' ') {
-    glyph_t g = get_glyph((unsigned char)g_toast[idx]);
+   if (idx >= 0 && idx < (int)txt.size() && txt[idx] != ' ') {
+    glyph_t g = get_glyph((unsigned char)txt[idx]);
     if (g.tex) {
      SDL_SetTextureColorMod(g.tex, 0, 0, 0);
      SDL_Rect d2 = dst; d2.w = g.w; d2.h = g.h;
@@ -196,6 +238,14 @@ static void present()
   }
  }
  SDL_RenderPresent(g_renderer);
+ g_last_present = SDL_GetTicks();
+ g_present_pending = false;
+}
+
+void set_hint_bar(bool on)
+{
+ g_toast_sticky = on;
+ present();
 }
 
 static void show_toast(const std::string &text, int ms)
@@ -281,11 +331,16 @@ static const char *DEFAULT_CFG =
 "#             enter esc tab space backspace up down left right none\n"
 "#             keyboard (opens the on-screen keyboard)  settings (opens this menu)\n"
 "#\n"
+"# movement:   auto  = the d-pad and the left stick never act at the same time\n"
+"#                      (whichever you touch first wins)\n"
+"#             stick = only the left stick moves, dpad = only the d-pad, both = no limit\n"
+"#\n"
 "# Edit this file, then press F5 in the game to reload it.\n"
 "\n"
 "repeat_delay = 300\n"
 "repeat_rate = 120\n"
 "deadzone = 0.5\n"
+"movement = auto\n"
 "\n"
 "A = enter\n"
 "B = esc\n"
@@ -326,6 +381,7 @@ static std::map<std::string, int> g_bind;
 static int   g_rep_delay = 300;
 static int   g_rep_rate  = 120;
 static float g_deadzone  = 0.5f;
+static int   g_move_mode = 0;      // 0 auto, 1 stick only, 2 d-pad only, 3 both
 static bool  g_btn[17];
 static int   g_ax[6];
 static int   g_stick_dir[2] = { -1, -1 };
@@ -336,7 +392,6 @@ static repeater_t g_rep_stick[2];
 
 // in-game settings menu state
 struct ui_in { std::string name; std::string full; };
-static bool g_ui_active = false;
 static bool g_open_ui = false;
 static int  g_ui_mod_pending = -1;
 static std::deque<ui_in> g_ui_q;
@@ -403,6 +458,14 @@ static void parse_cfg(const std::string &text)
   if (lname == "repeat_delay") { g_rep_delay = atoi(right.c_str()); continue; }
   if (lname == "repeat_rate")  { g_rep_rate  = atoi(right.c_str()); continue; }
   if (lname == "deadzone")     { g_deadzone  = (float)atof(right.c_str()); continue; }
+  if (lname == "movement") {
+   std::string v = str_lower(right);
+   if (v == "stick")      g_move_mode = 1;
+   else if (v == "dpad")  g_move_mode = 2;
+   else if (v == "both")  g_move_mode = 3;
+   else                   g_move_mode = 0;
+   continue;
+  }
   int key;
   if (!parse_key(right, key)) {
    fprintf(stderr, "controls.cfg line %d: unknown key '%s'\n", lineno, right.c_str());
@@ -415,7 +478,7 @@ static void parse_cfg(const std::string &text)
 static void load_controls()
 {
  g_bind.clear();
- g_rep_delay = 300; g_rep_rate = 120; g_deadzone = 0.5f;
+ g_rep_delay = 300; g_rep_rate = 120; g_deadzone = 0.5f; g_move_mode = 0;
  std::string text;
  FILE *f = fopen("controls.cfg", "rb");
  if (f) {
@@ -523,6 +586,20 @@ static void fire(const std::string &name)
   vk_input(name);
   return;
  }
+ if (g_move_mode != 3) {
+  bool is_dpad = (name.compare(0, 5, "DPAD_") == 0);
+  bool is_lstick = (name.compare(0, 7, "LSTICK_") == 0);
+  if (is_dpad || is_lstick) {
+   bool dpad_held = g_btn[11] || g_btn[12] || g_btn[13] || g_btn[14];
+   bool stick_held = g_stick_dir[0] >= 0;
+   if (g_move_mode == 1 && is_dpad)  return;
+   if (g_move_mode == 2 && is_lstick) return;
+   if (g_move_mode == 0) {
+    if (is_dpad && stick_held)   return;
+    if (is_lstick && dpad_held)  return;
+   }
+  }
+ }
  int key;
  if (lookup_binding(name, key)) {
   if (key == -3) {                 // open the on-screen keyboard
@@ -532,7 +609,8 @@ static void fire(const std::string &name)
   } else if (key == -4) {          // open the controller settings
    g_open_ui = true;
   } else if (key >= 0) {
-   g_keys.push_back(key);
+   if (g_keys.size() < 32)            // never let a backlog of keys build up
+    g_keys.push_back(key);
   }
  }
 }
@@ -620,7 +698,8 @@ static void update_repeats()
  repeater_t *reps[3] = { &g_rep_dpad, &g_rep_stick[0], &g_rep_stick[1] };
  for (int i = 0; i < 3; i++) {
   if (reps[i]->active && now >= reps[i]->next) {
-   fire(reps[i]->name);
+   if (g_keys.empty() || g_ui_active || g_vk_open)   // game still busy: skip this repeat
+    fire(reps[i]->name);
    reps[i]->next = now + g_rep_rate;
   }
  }
@@ -628,6 +707,7 @@ static void update_repeats()
 
 
 static void handle_event(const SDL_Event &e);
+static void dlogf(const char *fmt, ...);
 
 // ---------------------------------------------------------------------------
 // In-game controller settings (open with L3+R3, or F6 on the keyboard).
@@ -658,7 +738,8 @@ static void save_controls()
   return;
  fprintf(f, "# Controller configuration (saved from the in-game menu: L3+R3 or F6).\n");
  fprintf(f, "# Values: a single character or enter esc tab space backspace up down left right none\n\n");
- fprintf(f, "repeat_delay = %d\nrepeat_rate = %d\ndeadzone = %.2f\n\n", g_rep_delay, g_rep_rate, g_deadzone);
+ fprintf(f, "repeat_delay = %d\nrepeat_rate = %d\ndeadzone = %.2f\nmovement = %s\n\n", g_rep_delay, g_rep_rate, g_deadzone,
+         g_move_mode == 1 ? "stick" : g_move_mode == 2 ? "dpad" : g_move_mode == 3 ? "both" : "auto");
  for (std::map<std::string, int>::iterator it = g_bind.begin(); it != g_bind.end(); ++it)
   fprintf(f, "%s = %s\n", it->first.c_str(), key_name(it->second).c_str());
  fclose(f);
@@ -873,9 +954,10 @@ static void ui_edit_list()
 static void ui_main()
 {
  int cur = 0;
+ const int N = 8;
  for (;;) {
   char buf[96];
-  std::string items[7];
+  std::string items[8];
   items[0] = "Rebind an input (press the button you want to change)";
   items[1] = "Edit bindings list";
   snprintf(buf, sizeof(buf), "Repeat delay: %d ms   (left/right to change)", g_rep_delay);
@@ -884,12 +966,16 @@ static void ui_main()
   items[3] = buf;
   snprintf(buf, sizeof(buf), "Stick deadzone: %.2f   (left/right to change)", g_deadzone);
   items[4] = buf;
-  items[5] = "Reset everything to defaults";
-  items[6] = "Close and save";
+  snprintf(buf, sizeof(buf), "Movement: %s   (left/right to change)",
+           g_move_mode == 1 ? "left stick only" : g_move_mode == 2 ? "d-pad only" :
+           g_move_mode == 3 ? "stick and d-pad together" : "auto (stick or d-pad, never both)");
+  items[5] = buf;
+  items[6] = "Reset everything to defaults";
+  items[7] = "Close and save";
 
   scr_clear();
   scr_text(0, 2, "CONTROLLER SETTINGS", 11, 0);
-  for (int i = 0; i < 7; i++) {
+  for (int i = 0; i < N; i++) {
    bool sel = (i == cur);
    scr_text(3 + i * 2, 2, " " + items[i] + " ", sel ? 0 : 7, sel ? 7 : 0);
   }
@@ -899,24 +985,26 @@ static void ui_main()
   int n = ui_next(NULL, NULL, 0);
   switch (n) {
    case NAV_UP:   if (cur > 0) cur--; break;
-   case NAV_DOWN: if (cur < 6) cur++; break;
+   case NAV_DOWN: if (cur < N - 1) cur++; break;
    case NAV_LEFT:
    case NAV_RIGHT: {
     int d = (n == NAV_LEFT) ? -1 : 1;
     if (cur == 2) { g_rep_delay += d * 50; if (g_rep_delay < 0) g_rep_delay = 0; if (g_rep_delay > 1000) g_rep_delay = 1000; }
     if (cur == 3) { g_rep_rate += d * 10; if (g_rep_rate < 16) g_rep_rate = 16; if (g_rep_rate > 500) g_rep_rate = 500; }
     if (cur == 4) { g_deadzone += d * 0.05f; if (g_deadzone < 0.1f) g_deadzone = 0.1f; if (g_deadzone > 0.95f) g_deadzone = 0.95f; }
+    if (cur == 5) { g_move_mode = (g_move_mode + d + 4) % 4; }
     break;
    }
    case NAV_OK:
     if (cur == 0) ui_capture_and_bind();
     else if (cur == 1) ui_edit_list();
-    else if (cur == 5) {
+    else if (cur == 5) g_move_mode = (g_move_mode + 1) % 4;
+    else if (cur == 6) {
      g_bind.clear();
-     g_rep_delay = 300; g_rep_rate = 120; g_deadzone = 0.5f;
+     g_rep_delay = 300; g_rep_rate = 120; g_deadzone = 0.5f; g_move_mode = 0;
      parse_cfg(DEFAULT_CFG);
     }
-    else if (cur == 6) return;
+    else if (cur == 7) return;
     break;
    case NAV_CANCEL: return;
    default: break;
@@ -952,6 +1040,32 @@ static void run_config_ui()
  present();
 }
 
+// Fallback for pads SDL has no game-controller mapping for: use the raw joystick.
+// Button numbers follow the Switch layout (A,B,X,Y,L3,R3,L,R,ZL,ZR,+,-,left,up,right,down).
+// The face buttons are mapped by position (bottom button = "A"), like on an Xbox pad.
+static int raw_to_pad(int b)
+{
+ switch (b) {
+  case 0:  return 1;    // Nintendo A (right)   -> B
+  case 1:  return 0;    // Nintendo B (bottom)  -> A
+  case 2:  return 3;    // Nintendo X (top)     -> Y
+  case 3:  return 2;    // Nintendo Y (left)    -> X
+  case 4:  return 7;    // L3
+  case 5:  return 8;    // R3
+  case 6:  return 9;    // L  -> LB
+  case 7:  return 10;   // R  -> RB
+  case 8:  return 15;   // ZL -> LT
+  case 9:  return 16;   // ZR -> RT
+  case 10: return 6;    // +  -> START
+  case 11: return 4;    // -  -> BACK
+  case 12: return 13;   // d-pad left
+  case 13: return 11;   // d-pad up
+  case 14: return 14;   // d-pad right
+  case 15: return 12;   // d-pad down
+  default: return -1;
+ }
+}
+
 static void handle_event(const SDL_Event &e)
 {
  switch (e.type) {
@@ -965,9 +1079,37 @@ static void handle_event(const SDL_Event &e)
        e.window.event == SDL_WINDOWEVENT_RESTORED)
     present();
    break;
-  case SDL_CONTROLLERDEVICEADDED:
+  case SDL_RENDER_TARGETS_RESET:
+   g_prev_valid = false;
+   present();
+   break;
+  case SDL_RENDER_DEVICE_RESET:
+   for (std::map<unsigned short, glyph_t>::iterator it = g_glyphs.begin(); it != g_glyphs.end(); ++it)
+    if (it->second.tex) SDL_DestroyTexture(it->second.tex);
+   g_glyphs.clear();
+   if (g_target) { SDL_DestroyTexture(g_target); g_target = NULL; }
+   g_prev_valid = false;
+   present();
+   break;
+  case SDL_CONTROLLERDEVICEADDED: {
    SDL_GameControllerOpen(e.cdevice.which);
    show_toast("Controller connected - L3+R3: settings, START: on-screen keyboard", 6000);
+   break;
+  }
+  case SDL_JOYDEVICEADDED:
+   if (!SDL_IsGameController(e.jdevice.which)) {
+    SDL_JoystickOpen(e.jdevice.which);                // no mapping: use it as a raw joystick
+    show_toast("Controller connected - L3+R3: settings, START: on-screen keyboard", 6000);
+   }
+   break;
+  case SDL_JOYBUTTONDOWN:
+  case SDL_JOYBUTTONUP:
+   if (!SDL_GameControllerFromInstanceID(e.jbutton.which))
+    pad_button(raw_to_pad(e.jbutton.button), e.type == SDL_JOYBUTTONDOWN);
+   break;
+  case SDL_JOYAXISMOTION:
+   if (!SDL_GameControllerFromInstanceID(e.jaxis.which) && e.jaxis.axis <= 3)
+    pad_axis(e.jaxis.axis, e.jaxis.value);
    break;
   case SDL_CONTROLLERDEVICEREMOVED: {
    SDL_GameController *c = SDL_GameControllerFromInstanceID(e.cdevice.which);
@@ -1051,24 +1193,51 @@ static TTF_Font *open_font(int size)
  return NULL;
 }
 
+// Error log (fatal problems only): on the Switch it goes to
+// sdmc:/switch/cataclysm/cataclysm.log (there is no terminal there), on a PC to stderr.
+static void dlogf(const char *fmt, ...)
+{
+ char buf[512];
+ va_list ap;
+ va_start(ap, fmt);
+ vsnprintf(buf, sizeof(buf), fmt, ap);
+ va_end(ap);
+#ifdef __SWITCH__
+ FILE *f = fopen("sdmc:/switch/cataclysm/cataclysm.log", "a");
+ if (f) { fprintf(f, "%s\n", buf); fclose(f); }
+#else
+ fprintf(stderr, "%s\n", buf);
+#endif
+}
+
 WINDOW *initscr(void)
 {
  if (g_std)
   return g_std;
+ #ifdef __SWITCH__
+ // Everything (data/, save/, font.ttf, controls.cfg) lives on the SD card.
+ if (chdir("sdmc:/switch/cataclysm") != 0)
+  dlogf("cata: could not enter sdmc:/switch/cataclysm");
+ #endif
  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
-  fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+  dlogf("cata: SDL_Init failed: %s", SDL_GetError());
   exit(1);
  }
  if (TTF_Init() != 0) {
-  fprintf(stderr, "TTF_Init failed: %s\n", TTF_GetError());
+  dlogf("cata: TTF_Init failed: %s", TTF_GetError());
   exit(1);
  }
+ #ifdef __SWITCH__
+ int size = 24;     // 80x25 cells fit the 1280x720 screen
+ #else
  int size = 16;
+ #endif
  if (getenv("CATA_FONTSIZE"))
   size = atoi(getenv("CATA_FONTSIZE"));
  if (size < 6) size = 16;
  g_font = open_font(size);
  if (!g_font) {
+  dlogf("cata: NO FONT found (put font.ttf in the game folder)");
   fprintf(stderr, "No monospace font found.\n"
                   "Install one (Manjaro: sudo pacman -S ttf-dejavu) or put a font.ttf\n"
                   "next to the game, or set CATA_FONT=/path/to/font.ttf\n");
@@ -1081,18 +1250,22 @@ WINDOW *initscr(void)
  g_window = SDL_CreateWindow("Cataclysm", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              SCR_COLS * g_cw, SCR_ROWS * g_chh, SDL_WINDOW_RESIZABLE);
  if (!g_window) {
-  fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+  dlogf("cata: SDL_CreateWindow failed: %s", SDL_GetError());
   exit(1);
  }
  g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED);
  if (!g_renderer)
   g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
  if (!g_renderer) {
-  fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+  dlogf("cata: SDL_CreateRenderer failed: %s", SDL_GetError());
   exit(1);
  }
  SDL_RenderSetLogicalSize(g_renderer, SCR_COLS * g_cw, SCR_ROWS * g_chh);
+ #ifndef __SWITCH__
+ // On the Switch this would pop up the system software-keyboard applet, which takes over
+ // all input. Text is typed with the on-screen keyboard there instead.
  SDL_StartTextInput();
+ #endif
  load_controls();
  show_toast(g_first_run ? "Controller: L3+R3 = settings, START = on-screen keyboard (F6 on a PC keyboard)"
                        : "L3+R3: controller settings   |   START: on-screen keyboard", g_first_run ? 15000 : 7000);
@@ -1108,10 +1281,13 @@ WINDOW *initscr(void)
 
 int endwin(void)
 {
+ if (g_present_pending)
+  present();            // show the last state (e.g. the final save progress)
  for (std::map<unsigned short, glyph_t>::iterator it = g_glyphs.begin(); it != g_glyphs.end(); ++it)
   if (it->second.tex)
    SDL_DestroyTexture(it->second.tex);
  g_glyphs.clear();
+ if (g_target)   { SDL_DestroyTexture(g_target); g_target = NULL; }
  if (g_font)     { TTF_CloseFont(g_font); g_font = NULL; }
  if (g_renderer) { SDL_DestroyRenderer(g_renderer); g_renderer = NULL; }
  if (g_window)   { SDL_DestroyWindow(g_window); g_window = NULL; }
@@ -1162,8 +1338,12 @@ int wrefresh(WINDOW *win)
    g_screen[sy * SCR_COLS + sx] = win->cells[y * win->width + x];
   }
  }
- if (changed)
-  present();
+ if (changed) {
+  if (SDL_GetTicks() - g_last_present >= PRESENT_MIN_MS)
+   present();
+  else
+   g_present_pending = true;       // drawn at the next opportunity (getch / next refresh)
+ }
  return OK;
 }
 
@@ -1174,6 +1354,8 @@ int getch(void)
  // Like ncurses' wgetch(): implicitly refresh stdscr before waiting for a key.
  // (The help screens only call mvprintw + getch, without refresh().)
  wrefresh(g_std);
+ if (g_present_pending)
+  present();
  SDL_Event e;
  Uint32 start = SDL_GetTicks();
  for (;;) {
@@ -1186,6 +1368,8 @@ int getch(void)
    g_toast_until = 0;
    present();
   }
+  if (g_present_pending && SDL_GetTicks() - g_last_present >= PRESENT_MIN_MS)
+   present();
   update_repeats();
   if (!g_keys.empty()) {
    int k = g_keys.front();

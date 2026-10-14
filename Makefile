@@ -5,7 +5,7 @@
 #WARNINGS = -Wall -Wextra -Wno-switch -Wno-sign-compare -Wno-missing-braces -Wno-unused-parameter -Wno-char-subscripts
 #DEBUG = -g
 #PROFILE = -pg
-OTHERS = -g -O0 -std=gnu++98 $(shell sdl2-config --cflags)
+OTHERS = -O2 -std=gnu++98 -fsigned-char $(shell sdl2-config --cflags)
 
 ODIR = obj
 DDIR = .deps

@@ -39,7 +39,7 @@ k: Items overview\n\
 l: Combat\n\
 m: Unarmed Styles\n\
 n: Survival tips\n\
-o/start: Controller (gamepad) settings\n\
+o: Controller (gamepad) settings\n\
 \n\
 1: List of all commands (you can change key commands here)\n\
 2: List of all options  (you can change options here)\n\

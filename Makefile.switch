@@ -1,0 +1,76 @@
+# --- Cataclysm: Nintendo Switch (devkitPro / devkitA64) build ---
+# Futtatás:  make -f Makefile.switch
+DEVKITPRO ?= /opt/devkitpro
+DEVKITA64 ?= $(DEVKITPRO)/devkitA64
+PORTLIBS  ?= $(DEVKITPRO)/portlibs/switch
+
+PREFIX    := $(DEVKITA64)/bin/aarch64-none-elf-
+CXX       := $(PREFIX)g++
+CC        := $(PREFIX)gcc
+LD        := $(PREFIX)g++
+ELF2NRO   := $(DEVKITPRO)/tools/bin/elf2nro
+NACPTOOL  := $(DEVKITPRO)/tools/bin/nacptool
+ICON      := $(DEVKITPRO)/libnx/default_icon.jpg
+$(if $(wildcard $(ICON)),,$(warning icon not found: $(ICON) - the NRO will be built without an icon))
+
+APP_TITLE   := Cataclysm
+APP_AUTHOR  := Whales (Switch port)
+APP_VERSION := 0.1
+
+ARCH      := -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+
+# -fsigned-char: on ARM a plain 'char' is unsigned, on the PCs this 2010 code was written for it is
+# signed (e.g. getch() returning -1 / ERR stored in a char). Keep the old behaviour.
+CFLAGS    := -g -O0 -std=gnu++98 -fsigned-char $(ARCH) -ffunction-sections \
+             -I$(PORTLIBS)/include \
+             -I$(PORTLIBS)/include/SDL2 \
+             -I$(DEVKITPRO)/libnx/include \
+             -D__SWITCH__ -D_GNU_SOURCE=1
+
+# A freetype (SDL2_ttf-en keresztül) további könyvtárakat igényel: bzip2, png, zlib,
+# és ha telepítve van, brotli. A csoportosítás (--start-group) miatt a sorrend nem számít.
+BROTLI    := $(if $(wildcard $(PORTLIBS)/lib/libbrotlidec.a),-lbrotlidec -lbrotlicommon,)
+
+LDFLAGS   := -specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,--gc-sections -Wl,--wrap=exit \
+             -L$(PORTLIBS)/lib -L$(DEVKITPRO)/libnx/lib \
+             -Wl,--start-group \
+             -lSDL2_ttf -lfreetype -lharfbuzz -lbz2 -lpng -lz $(BROTLI) \
+             -Wl,--end-group \
+             -lSDL2 -lEGL -lglapi -ldrm_nouveau -lnx
+
+# Külön obj mappa, hogy ne keveredjen az asztali (x86) fordítással
+ODIR   = obj_switch
+TARGET = cataclysm
+
+SOURCES = $(wildcard *.cpp)
+OBJS    = $(patsubst %.cpp,$(ODIR)/%.o,$(SOURCES)) $(ODIR)/switch_main.o
+
+all: $(TARGET).nro
+
+# A NACP (title/author/version) is what the emulator shows and expects for homebrew.
+$(TARGET).nacp:
+	$(NACPTOOL) --create "$(APP_TITLE)" "$(APP_AUTHOR)" "$(APP_VERSION)" $@
+
+$(TARGET).nro: $(TARGET).elf $(TARGET).nacp
+	$(ELF2NRO) $(TARGET).elf $@ --nacp=$(TARGET).nacp $(if $(wildcard $(ICON)),--icon=$(ICON),)
+
+$(TARGET).elf: $(ODIR) $(OBJS)
+	$(LD) -o $@ $(OBJS) $(LDFLAGS)
+
+$(ODIR):
+	mkdir -p $(ODIR)
+
+$(ODIR)/%.o: %.cpp
+	$(CXX) $(CFLAGS) -c $< -o $@
+
+# The game's main() becomes game_main(); switch_main.c calls it on a thread with a big stack.
+$(ODIR)/main.o: main.cpp
+	$(CXX) $(CFLAGS) -Dmain=game_main -c $< -o $@
+
+$(ODIR)/switch_main.o: switch_main.c
+	$(CC) -g -O2 -std=gnu99 $(ARCH) -I$(DEVKITPRO)/libnx/include -D__SWITCH__ -c $< -o $@
+
+clean:
+	rm -rf $(ODIR) $(TARGET).elf $(TARGET).nro $(TARGET).nacp
+
+.PHONY: all clean
