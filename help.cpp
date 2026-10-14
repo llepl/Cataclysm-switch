@@ -25,7 +25,6 @@ void game::help()
   mvprintz(1, 0, c_white, "\
 Please press one of the following for help on that topic:\n\
 Press q or ESC to return to the game.\n\
-\n\
 a: Introduction\n\
 b: Movement\n\
 c: Hunger, Thirst, and Sleep\n\
@@ -40,6 +39,7 @@ k: Items overview\n\
 l: Combat\n\
 m: Unarmed Styles\n\
 n: Survival tips\n\
+o/start: Controller (gamepad) settings\n\
 \n\
 1: List of all commands (you can change key commands here)\n\
 2: List of all options  (you can change options here)\n\
@@ -52,6 +52,30 @@ q: Return to game");
  
   ch = getch();
   switch (ch) {
+  case 'o':
+  case 'O':
+   erase();
+   mvprintz(0, 0, c_white, "\
+CONTROLLER (GAMEPAD) SETTINGS\n\
+\n\
+This version supports game controllers (Xbox, Switch Pro, and similar).\n\
+\n\
+L3 + R3 (press both sticks)  opens the controller settings menu.\n\
+START                        opens an on-screen keyboard, so you can type\n\
+                             any letter, number or symbol with the controller.\n\
+(On a PC keyboard: F6 = settings.)\n\
+\n\
+In the settings menu you can:\n\
+ - Rebind any button, stick direction or combination to any key\n\
+ - Hold LT, RT, LB or RB while pressing another input to make combos\n\
+   (for example LT + A)\n\
+ - Change the stick deadzone and the key repeat speed\n\
+\n\
+Your changes are saved automatically.\n\
+\n\
+Press any key to return.");
+   getch();
+   break;
   case 'a':
   case 'A':
    erase();
