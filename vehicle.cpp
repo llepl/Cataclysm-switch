@@ -1772,5 +1772,6 @@ bool vehicle::fire_turret_internal (int p, it_gun &gun, it_ammo &ammo, int charg
         for (int i = 0; i < traj.size(); i++)
             g->m.add_field(g, traj[i].x, traj[i].y, fd_fire, 1);
     }
+    return true;
 }
 

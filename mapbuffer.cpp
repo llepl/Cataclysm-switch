@@ -39,6 +39,7 @@ bool mapbuffer::add_submap(int x, int y, int z, submap *sm)
   sm->turn_last_touched = int(master_game->turn);
  submap_list.push_back(sm);
  submaps[p] = sm;
+ return true;
 }
 
 submap* mapbuffer::lookup_submap(int x, int y, int z)
